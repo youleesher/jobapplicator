@@ -1,11 +1,16 @@
 import os
 import json
 import tempfile
-from jinja2 import Template
-from xhtml2pdf import pisa
 from pypdf import PdfReader
 from google import genai
 from google.genai import types
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+from reportlab.platypus.flowables import KeepTogether
 
 
 class Tailor:
@@ -20,7 +25,7 @@ class Tailor:
         Args:
             cv_text       (str):  Extracted text from the user's master CV PDF.
             gemini_key    (str):  Gemini API key.
-            personal_info (dict): Keys — name, phone, email, linkedin, education.
+            personal_info (dict): Keys — name, phone, email, linkedin, education, skills.
             shortlist_sheet:      gspread Worksheet object for the Shortlisted tab.
         """
         self.cv_text = cv_text
@@ -83,7 +88,7 @@ Return ONLY a valid JSON object with this structure:
             return f"Error: {e}"
 
     # ------------------------------------------------------------------
-    # PDF: Generate tailored resume
+    # PDF: Generate tailored resume using ReportLab (pure Python, no OS deps)
     # ------------------------------------------------------------------
 
     def generate_pdf_resume(self, tailored_content, company, job_title="Role"):
@@ -95,102 +100,121 @@ Return ONLY a valid JSON object with this structure:
         summary = tailored_content.get("tailored_summary", "No summary generated.")
         experiences = tailored_content.get("rephrased_experiences", [])
 
-        html_template = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        @page { margin: 2cm; }
-        body {
-            font-family: Helvetica, Arial, sans-serif;
-            color: #000000;
-            font-size: 10pt;
-            line-height: 1.3;
-        }
-        a { color: #0000EE; text-decoration: none; }
-        .header { text-align: center; margin-bottom: 15px; }
-        .header h1 {
-            font-size: 20pt; margin: 0;
-            text-transform: uppercase; letter-spacing: 1px;
-        }
-        .header p { font-size: 10pt; margin: 2px 0 0 0; }
-        h2 {
-            font-size: 12pt; text-transform: uppercase;
-            border-bottom: 1px solid #000;
-            margin-top: 15px; margin-bottom: 5px; padding-bottom: 2px;
-        }
-        .entry-header {
-            font-weight: bold; font-size: 11pt;
-            margin-top: 8px; margin-bottom: 2px;
-        }
-        p { margin: 0 0 8px 0; text-align: justify; }
-        ul { margin: 0 0 10px 20px; padding: 0; }
-        li { margin-bottom: 4px; text-align: justify; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>{{ name }}</h1>
-        <p>
-            Phone: {{ phone }} |
-            Email: <a href="mailto:{{ email }}">{{ email }}</a> |
-            LinkedIn: <a href="https://{{ linkedin }}">{{ linkedin }}</a>
-        </p>
-    </div>
-
-    <h2>Summary</h2>
-    <p>{{ summary }}</p>
-
-    <h2>Education</h2>
-    <p>{{ education }}</p>
-
-    <h2>Relevant Experience</h2>
-    {% for exp in experiences %}
-        <div class="entry-header">{{ exp.role_company }}</div>
-        <ul>
-            {% for bullet in exp.optimized_bullets %}
-                <li>{{ bullet }}</li>
-            {% endfor %}
-        </ul>
-    {% endfor %}
-
-    {% if skills %}
-    <h2>Technical Skills</h2>
-    <p>{{ skills }}</p>
-    {% endif %}
-</body>
-</html>
-"""
-
-        rendered_html = Template(html_template).render(
-            name=p.get("name", ""),
-            phone=p.get("phone", ""),
-            email=p.get("email", ""),
-            linkedin=p.get("linkedin", ""),
-            education=p.get("education", ""),
-            skills=p.get("skills", ""),
-            summary=summary,
-            experiences=experiences,
-        )
-
         def sanitize(s):
             return "".join(c for c in s if c.isalnum() or c in " -").replace(" ", "_").strip("_") or "Unknown"
 
         output_dir = tempfile.mkdtemp()
         filename = os.path.join(output_dir, f"{sanitize(company)}_{sanitize(job_title)}_Resume.pdf")
 
+        # ── Styles ──────────────────────────────────────────────────────
+        base = getSampleStyleSheet()
+
+        name_style = ParagraphStyle(
+            "Name",
+            parent=base["Normal"],
+            fontSize=18,
+            fontName="Helvetica-Bold",
+            spaceAfter=2,
+            alignment=1,  # centre
+        )
+        contact_style = ParagraphStyle(
+            "Contact",
+            parent=base["Normal"],
+            fontSize=9,
+            spaceAfter=12,
+            alignment=1,
+        )
+        section_style = ParagraphStyle(
+            "Section",
+            parent=base["Normal"],
+            fontSize=10,
+            fontName="Helvetica-Bold",
+            spaceBefore=10,
+            spaceAfter=4,
+            textTransform="uppercase",
+        )
+        body_style = ParagraphStyle(
+            "Body",
+            parent=base["Normal"],
+            fontSize=9,
+            leading=13,
+            spaceAfter=6,
+        )
+        role_style = ParagraphStyle(
+            "Role",
+            parent=base["Normal"],
+            fontSize=9,
+            fontName="Helvetica-Bold",
+            spaceBefore=6,
+            spaceAfter=2,
+        )
+        bullet_style = ParagraphStyle(
+            "Bullet",
+            parent=base["Normal"],
+            fontSize=9,
+            leading=13,
+            leftIndent=12,
+            bulletIndent=0,
+            spaceAfter=2,
+        )
+
+        # ── Build story ──────────────────────────────────────────────────
+        story = []
+
+        # Header
+        story.append(Paragraph(p.get("name", "").upper(), name_style))
+        contact_line = " | ".join(filter(None, [
+            p.get("phone", ""),
+            p.get("email", ""),
+            p.get("linkedin", ""),
+        ]))
+        story.append(Paragraph(contact_line, contact_style))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.black))
+
+        # Summary
+        story.append(Paragraph("Summary", section_style))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.black))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(summary, body_style))
+
+        # Education
+        if p.get("education"):
+            story.append(Paragraph("Education", section_style))
+            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.black))
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(p["education"], body_style))
+
+        # Relevant Experience
+        story.append(Paragraph("Relevant Experience", section_style))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.black))
+        story.append(Spacer(1, 4))
+
+        for exp in experiences:
+            role_block = [Paragraph(exp.get("role_company", ""), role_style)]
+            for bullet in exp.get("optimized_bullets", []):
+                role_block.append(Paragraph(f"• {bullet}", bullet_style))
+            story.append(KeepTogether(role_block))
+
+        # Technical Skills
+        if p.get("skills"):
+            story.append(Paragraph("Technical Skills", section_style))
+            story.append(HRFlowable(width="100%", thickness=0.5, color=colors.black))
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(p["skills"], body_style))
+
+        # ── Render ───────────────────────────────────────────────────────
         try:
-            with open(filename, "w+b") as f:
-                status = pisa.CreatePDF(rendered_html, dest=f)
-            if not status.err:
-                print(f"PDF generated: {filename}")
-                return filename
-            else:
-                print("xhtml2pdf rendering failed.")
-                return None
+            doc = SimpleDocTemplate(
+                filename,
+                pagesize=A4,
+                leftMargin=2*cm, rightMargin=2*cm,
+                topMargin=2*cm, bottomMargin=2*cm,
+            )
+            doc.build(story)
+            print(f"PDF generated: {filename}")
+            return filename
         except Exception as e:
-            print(f"PDF write error: {e}")
+            print(f"PDF render error: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -267,6 +291,9 @@ def extract_cv_text(pdf_path):
 #     }
 #
 #     cv_text = extract_cv_text("Master_CV.pdf")
+#     if cv_text:
+#         tailor = Tailor(cv_text, os.getenv("GEMINI_API_KEY"), personal_info, shortlist_sheet)
+#         tailor.process_approved_jobs()
 #     if cv_text:
 #         tailor = Tailor(cv_text, os.getenv("GEMINI_API_KEY"), personal_info, shortlist_sheet)
 #         tailor.process_approved_jobs()
