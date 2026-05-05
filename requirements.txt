@@ -1,0 +1,9 @@
+streamlit
+gspread
+google-auth
+google-genai
+pypdf
+xhtml2pdf
+jinja2
+python-dotenv
+playwright
